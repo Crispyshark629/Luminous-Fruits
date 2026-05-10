@@ -1,0 +1,276 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>粒子星球手势交互控制</title>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <style>
+        body { margin: 0; overflow: hidden; background: #000; font-family: sans-serif; }
+        #container { position: relative; width: 100vw; height: 100vh; }
+        #video-container {
+            position: absolute;
+            bottom: 20px;
+            right: 20px;
+            width: 240px;
+            height: 180px;
+            border: 2px solid rgba(255, 165, 0, 0.5);
+            border-radius: 8px;
+            overflow: hidden;
+            transform: scaleX(-1); /* 镜像画面 */
+            z-index: 10;
+        }
+        #input_video { width: 100%; height: 100%; object-fit: cover; }
+        #ui {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            color: white;
+            pointer-events: none;
+            text-shadow: 0 0 5px rgba(0,0,0,0.8);
+        }
+        .instruction { font-size: 14px; opacity: 0.8; margin-top: 5px; }
+        #status { color: #ffa500; font-weight: bold; }
+        canvas { display: block; }
+    </style>
+</head>
+<body>
+
+<div id="container">
+    <div id="ui">
+        <h1>果切粒子星球</h1>
+        <div id="status">正在加载 MediaPipe...</div>
+        <div class="instruction">✋ 旋转手掌：同步旋转星球</div>
+        <div class="instruction">✊ 握拳远去：快速拉远 (先慢后快)</div>
+        <div class="instruction">🖐️ 五指张开靠近：快速推进 (先快后慢)</div>
+    </div>
+
+    <div id="video-container">
+        <video id="input_video"></video>
+    </div>
+</div>
+
+<script>
+    // --- 配置与变量 ---
+    let scene, camera, renderer, planetParticles, ring1, ring2;
+    let targetRotationX = 0, targetRotationY = 0;
+    let currentRotationX = 0, currentRotationY = 0;
+    let targetDistance = 15;
+    let currentDistance = 30;
+    const minDistance = 5;
+    const maxDistance = 60;
+
+    const videoElement = document.getElementById('input_video');
+    const statusElement = document.getElementById('status');
+
+    // --- 初始化 Three.js ---
+    function initThree() {
+        scene = new THREE.Scene();
+        camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+        camera.position.z = currentDistance;
+
+        renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.setPixelRatio(window.devicePixelRatio);
+        document.getElementById('container').appendChild(renderer.domElement);
+
+        // 创建粒子贴图 (一个发光的圆)
+        const textureLoader = new THREE.TextureLoader();
+	const myTexture = textureLoader.load('./niuyouguo.png');
+
+        // 1. 创建星球粒子 
+        const planetCount = 8000;
+        const planetGeo = new THREE.BufferGeometry();
+        const planetPos = new Float32Array(planetCount * 3);
+        const radius = 5;
+
+        for (let i = 0; i < planetCount; i++) {
+            // 在球面上或者球面附近均匀分布
+            const phi = Math.acos(-1 + (2 * i) / planetCount);
+            const theta = Math.sqrt(planetCount * Math.PI) * phi;
+            
+            // 加入一点随机偏移使星球看起来更厚实灿烂
+            const r = radius + (Math.random() - 0.5) * 0.4; 
+            planetPos[i * 3] = r * Math.sin(phi) * Math.cos(theta);
+            planetPos[i * 3 + 1] = r * Math.sin(phi) * Math.sin(theta);
+            planetPos[i * 3 + 2] = r * Math.cos(phi);
+        }
+        planetGeo.setAttribute('position', new THREE.BufferAttribute(planetPos, 3));
+        const planetMat = new THREE.PointsMaterial({
+            color: 0xffffff,
+            size: 0.15,
+            transparent: true,
+            blending: THREE.AdditiveBlending,
+            map: myTexture,
+            depthWrite: false
+        });
+        planetParticles = new THREE.Points(planetGeo, planetMat);
+        scene.add(planetParticles);
+
+        // 2. 创建白色星环
+        function createRing(inner, outer, count, tiltX, tiltZ) {
+            const geo = new THREE.BufferGeometry();
+            const pos = new Float32Array(count * 3);
+            for (let i = 0; i < count; i++) {
+                const r = inner + Math.random() * (outer - inner);
+                const angle = Math.random() * Math.PI * 2;
+                pos[i * 3] = Math.cos(angle) * r;
+                pos[i * 3 + 1] = (Math.random() - 0.5) * 0.2; // 略微扁平
+                pos[i * 3 + 2] = Math.sin(angle) * r;
+            }
+            geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+            const mat = new THREE.PointsMaterial({
+                color: 0xffffff,
+                size: 0.08,
+                transparent: true,
+                opacity: 0.6,
+                blending: THREE.AdditiveBlending,
+                map: myTexture,
+                depthWrite: false
+            });
+            const points = new THREE.Points(geo, mat);
+            points.rotation.x = tiltX;
+            points.rotation.z = tiltZ;
+            return points;
+        }
+
+        ring1 = createRing(7, 9, 3000, Math.PI / 3, 0.2);
+        ring2 = createRing(9.5, 11, 2000, -Math.PI / 4, -0.3);
+        scene.add(ring1);
+        scene.add(ring2);
+
+        window.addEventListener('resize', onWindowResize, false);
+    }
+
+    function onWindowResize() {
+        camera.aspect = window.innerWidth / window.innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(window.innerWidth, window.innerHeight);
+    }
+
+    // --- MediaPipe 手势逻辑 ---
+    const hands = new Hands({
+        locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`
+    });
+
+    hands.setOptions({
+        maxNumHands: 1,
+        modelComplexity: 1,
+        minDetectionConfidence: 0.7,
+        minTrackingConfidence: 0.7
+    });
+
+    hands.onResults(onResults);
+
+    function onResults(results) {
+        if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+            statusElement.innerText = "手势控制已激活";
+            const landmarks = results.multiHandLandmarks[0];
+
+            // 1. 计算手掌旋转 (通过腕部和指尖向量)
+            const wrist = landmarks[0];
+            const indexBase = landmarks[5];
+            const indexTip = landmarks[8];
+            const middleTip = landmarks[12];
+            const ringTip = landmarks[16];
+            const pinkyTip = landmarks[20];
+            const thumbTip = landmarks[4];
+
+            // 旋转：使用腕部到中指根部的向量作为旋转基准
+            // 在画面坐标系中，y向上是正，x向右是正
+            targetRotationY = (landmarks[0].x - 0.5) * 4;
+            targetRotationX = (landmarks[0].y - 0.5) * 4;
+
+            // 2. 识别握拳 (Fist) 还是 张开 (Open Hand)
+            // 简单判断：如果四个指尖距离腕部都比较近，视为握拳
+            const tips = [indexTip, middleTip, ringTip, pinkyTip];
+            let distSum = 0;
+            tips.forEach(tip => {
+                const d = Math.sqrt(Math.pow(tip.x - wrist.x, 2) + Math.pow(tip.y - wrist.y, 2));
+                distSum += d;
+            });
+            const isFist = distSum < 0.6; // 阈值
+
+            // 3. 计算缩放逻辑
+            // 获取手掌在画面中的宽度/面积近似值作为 "近/远" 的依据
+            const palmWidth = Math.abs(indexBase.x - landmarks[17].x);
+            
+            if (isFist) {
+                // 握拳且拉远：增加距离
+                // 我们通过 palmWidth 的变小来触发“拉远”
+                if (palmWidth < 0.15) {
+                    targetDistance += 0.5;
+                }
+            } else {
+                // 五指张开且靠近：减小距离
+                if (palmWidth > 0.25) {
+                    targetDistance -= 0.8;
+                }
+            }
+
+            // 限制边界
+            targetDistance = Math.max(minDistance, Math.min(maxDistance, targetDistance));
+        } else {
+            statusElement.innerText = "未检测到手部";
+        }
+    }
+
+    const cameraControl = new Camera(videoElement, {
+        onFrame: async () => {
+            await hands.send({ image: videoElement });
+        },
+        width: 640,
+        height: 480
+    });
+    cameraControl.start();
+
+    // --- 动画循环 ---
+    function animate() {
+        requestAnimationFrame(animate);
+
+        // 旋转平滑差值 (相机围绕中心旋转)
+        currentRotationX += (targetRotationX - currentRotationX) * 0.05;
+        currentRotationY += (targetRotationY - currentRotationY) * 0.05;
+
+        // 距离平滑差值
+        // 根据要求：拉远时速度先慢后快，靠近时先快后慢
+        // 这里的简单物理模拟：我们可以根据目标与当前值的差值比例来调整系数
+        let distDiff = targetDistance - currentDistance;
+        let distStep;
+        
+        if (distDiff > 0) {
+            // 拉远：先慢后快 (指数增长感)
+            distStep = distDiff * 0.02 + (distDiff * distDiff * 0.005);
+        } else {
+            // 靠近：先快后慢 (类似缓动)
+            distStep = distDiff * 0.1;
+        }
+        currentDistance += distStep;
+
+        // 更新相机位置 (球面坐标系)
+        camera.position.x = currentDistance * Math.sin(currentRotationY) * Math.cos(currentRotationX);
+        camera.position.y = -currentDistance * Math.sin(currentRotationX);
+        camera.position.z = currentDistance * Math.cos(currentRotationY) * Math.cos(currentRotationX);
+        camera.lookAt(0, 0, 0);
+
+        // 星球自转
+        if (planetParticles) {
+            planetParticles.rotation.y += 0.002;
+            ring1.rotation.y -= 0.001;
+            ring2.rotation.y += 0.0015;
+        }
+
+        renderer.render(scene, camera);
+    }
+
+    // 启动
+    window.onload = () => {
+        initThree();
+        animate();
+    };
+
+</script>
+</body>
+</html>

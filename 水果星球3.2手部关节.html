@@ -1,0 +1,462 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>粒子星球手势交互控制</title>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <style>
+        body { margin: 0; overflow: hidden; background: #000; font-family: sans-serif; }
+        #container { position: relative; width: 100vw; height: 100vh; }
+        #video-container {
+            position: absolute;
+            bottom: 20px;
+            right: 20px;
+            width: 240px;
+            height: 180px;
+            border: 2px solid rgba(255, 165, 0, 0.5);
+            border-radius: 8px;
+            overflow: hidden;
+            z-index: 10;
+        }
+        #input_video { width: 100%; height: 100%; object-fit: cover; transform: scaleX(-1); }
+
+        #hand-canvas {
+            position: absolute;
+            top: 0; left: 0;
+            width: 100%; height: 100%;
+            pointer-events: none;
+        }
+
+        #ui {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            color: white;
+            pointer-events: none;
+            text-shadow: 0 0 5px rgb/*  */a(0,0,0,0.8);
+        }/*  */
+        .instruction { font-size: 12px; opacity: 0.8; margin-top: 5px; }
+        #status { color: #ffa500; font-weight: bold; }
+        canvas { display: block; }
+
+        /* ── 速度控制条 ── */
+        #speed-bar {
+            position: absolute;
+            top: 24px;
+            left: 50%;
+            transform: translateX(-50%);
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            background: rgba(255, 255, 255, 0.08);
+            backdrop-filter: blur(16px) saturate(180%);
+            -webkit-backdrop-filter: blur(16px) saturate(180%);
+            border: 1px solid rgba(255, 255, 255, 0.15);
+            border-radius: 980px;
+            padding: 10px 20px;
+            z-index: 20;
+            user-select: none;
+        }
+        #speed-bar label {
+            color: rgba(255, 255, 255, 0.75);
+            font-size: 12px;
+            font-weight: 500;
+            letter-spacing: 0.02em;
+            white-space: nowrap;
+        }
+        #speed-slider {
+            -webkit-appearance: none;
+            appearance: none;
+            width: 140px;
+            height: 4px;
+            border-radius: 2px;
+            background: rgba(255, 255, 255, 0.2);
+            outline: none;
+            cursor: pointer;
+        }
+        #speed-slider::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            appearance: none;
+            width: 18px;
+            height: 18px;
+            border-radius: 50%;
+            background: #ffffff;
+            box-shadow: 0 1px 4px rgba(0,0,0,0.35);
+            cursor: pointer;
+            transition: transform 0.15s, box-shadow 0.15s;
+        }
+        #speed-slider::-webkit-slider-thumb:active {
+            transform: scale(1.2);
+            box-shadow: 0 2px 8px rgba(0,0,0,0.5);
+        }
+        #speed-slider::-moz-range-thumb {
+            width: 18px; height: 18px;
+            border: none; border-radius: 50%;
+            background: #ffffff;
+            box-shadow: 0 1px 4px rgba(0,0,0,0.35);
+            cursor: pointer;
+        }
+        #speed-val {
+            color: rgba(255, 255, 255, 0.45);
+            font-size: 11px;
+            width: 28px;
+            text-align: right;
+        }
+    </style>
+</head>
+<body>
+
+<div id="container">
+
+    <!-- 速度控制滑块 -->
+    <div id="speed-bar">
+        <label>自转速度</label>
+        <input id="speed-slider" type="range" min="0" max="100" value="40">
+        <span id="speed-val">×1</span>
+    </div>
+    <div id="ui">
+        <h1>果切粒子星球</h1>
+        <div id="status">MediaPipe loading...</div>
+        <div class="instruction">✋ 旋转手掌：同步旋转星球</div>
+        <div class="instruction">✊ 握拳远去：快速拉远</div>
+        <div class="instruction">🖐️ 五指张开靠近：快速推进 </div>
+    </div>
+
+    <div id="video-container">
+        <video id="input_video"></video>
+        <canvas id="hand-canvas"></canvas>
+    </div>
+</div>
+
+<script>
+    // --- 配置与变量 ---
+    let scene, camera, renderer, ring1;
+    let rotationSpeed = 1.0; // 自转速度倍数，由滑块控制
+    let planetGroups = []; // 存放各水果粒子组
+    let targetRotationX = 0, targetRotationY = 0;
+    let currentRotationX = 0, currentRotationY = 0;
+    let targetDistance = 15;
+    let currentDistance = 30;
+    const minDistance = 5;
+    const maxDistance = 60;
+
+    const videoElement = document.getElementById('input_video');
+    const statusElement = document.getElementById('status');
+
+    // =====================================================================
+    // 【关键配置】：在这里填写你项目中所有水果 PNG 的路径
+    // 每张图对应的粒子数量可以通过 count 字段调整
+    // =====================================================================
+    const fruitTextures = [
+        { path: './apricot.png',  count: 1500 }, // 杏子
+        { path: './avocado.png',      count: 1500 }, // 牛油果（示例，按实际文件名替换）
+        { path: './fig.png',     count: 1500 }, // 无花果
+        { path: './plum.png',       count: 1500 }, // 李子
+        { path: './mango.png',      count: 1000 }, // 芒果
+        { path: './apple.png',      count: 1000 }, // 苹果
+        { path: './strawberry.png',      count: 1000 }, // 草莓
+        { path: './watermelon.png',      count: 1000 }, // 西瓜
+        { path: './durian.png',      count: 1000 }, // 榴莲
+    ];
+    // 若某张图加载失败，Three.js 会自动降级为白色方块粒子，不影响整体运行。
+    // =====================================================================
+
+    // --- 初始化 Three.js ---
+    function initThree() {
+        scene = new THREE.Scene();
+        camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+        camera.position.z = currentDistance;
+
+        renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.setPixelRatio(window.devicePixelRatio);
+        document.getElementById('container').appendChild(renderer.domElement);
+
+        const textureLoader = new THREE.TextureLoader();
+        const radius = 5;
+
+        // 计算所有图片的总粒子数，用于均匀铺满球面
+        const totalCount = fruitTextures.reduce((sum, f) => sum + f.count, 0);
+
+        // 泊松球面采样：保证粒子间最小角距离，避免重叠堆积
+        // minAngle 越大间距越大（粒子越少），根据粒子数量自动估算合适值
+        const minAngle = Math.sqrt(4 * Math.PI / totalCount) * 0.85; // 自适应最小夹角（弧度）
+        const maxAttempts = 30; // 每个点最多尝试次数
+
+        // 存储已接受点的单位向量，用于距离检测
+        const accepted = [];
+        const cosMin = Math.cos(minAngle);
+
+        function isTooClose(nx, ny, nz) {
+            for (let k = 0; k < accepted.length; k++) {
+                const a = accepted[k];
+                if (a.x * nx + a.y * ny + a.z * nz > cosMin) return true;
+            }
+            return false;
+        }
+
+        const allPositions = [];
+        let tries = 0;
+        const maxTotal = totalCount * maxAttempts * 2;
+
+        while (allPositions.length < totalCount && tries < maxTotal) {
+            tries++;
+            const phi   = Math.acos(2 * Math.random() - 1);
+            const theta = Math.random() * Math.PI * 2;
+            const nx = Math.sin(phi) * Math.cos(theta);
+            const ny = Math.sin(phi) * Math.sin(theta);
+            const nz = Math.cos(phi);
+
+            if (!isTooClose(nx, ny, nz)) {
+                accepted.push({ x: nx, y: ny, z: nz });
+                const r = radius + (Math.random() - 0.5) * 0.4;
+                allPositions.push([nx * r, ny * r, nz * r]);
+            }
+        }
+        // 若泊松采样因密度过高未能填满，用纯随机补足剩余位置
+        while (allPositions.length < totalCount) {
+            const phi   = Math.acos(2 * Math.random() - 1);
+            const theta = Math.random() * Math.PI * 2;
+            const r = radius + (Math.random() - 0.5) * 0.4;
+            allPositions.push([
+                r * Math.sin(phi) * Math.cos(theta),
+                r * Math.sin(phi) * Math.sin(theta),
+                r * Math.cos(phi)
+            ]);
+        }
+
+        // 为每种水果图片创建独立的 Points 对象
+        let offset = 0;
+        fruitTextures.forEach(({ path, count }) => {
+            const geo = new THREE.BufferGeometry();
+            const pos = new Float32Array(count * 3);
+
+            for (let i = 0; i < count; i++) {
+                const p = allPositions[offset + i];
+                pos[i * 3]     = p[0];
+                pos[i * 3 + 1] = p[1];
+                pos[i * 3 + 2] = p[2];
+            }
+            offset += count;
+
+            geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+
+            const mat = new THREE.PointsMaterial({
+                color: 0xffffff,
+                size: 0.22,
+                transparent: true,
+                blending: THREE.AdditiveBlending,
+                map: textureLoader.load(path),
+                depthWrite: false,
+                sizeAttenuation: true,
+            });
+
+            const points = new THREE.Points(geo, mat);
+            scene.add(points);
+            planetGroups.push(points);
+        });
+
+        // ── 单星环（已移除 ring2）──
+        function createRing(inner, outer, count, tiltX, tiltZ) {
+            const geo = new THREE.BufferGeometry();
+            const pos = new Float32Array(count * 3);
+            // 星环粒子复用第一张水果贴图，保持视觉统一
+            const ringTexture = textureLoader.load(fruitTextures[0].path);
+            for (let i = 0; i < count; i++) {
+                const r     = inner + Math.random() * (outer - inner);
+                const angle = Math.random() * Math.PI * 2;
+                pos[i * 3]     = Math.cos(angle) * r;
+                pos[i * 3 + 1] = (Math.random() - 0.5) * 0.2;
+                pos[i * 3 + 2] = Math.sin(angle) * r;
+            }
+            geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+            const mat = new THREE.PointsMaterial({
+                color: 0xffffff,
+                size: 0.08,
+                transparent: true,
+                opacity: 0.6,
+                blending: THREE.AdditiveBlending,
+                map: ringTexture,
+                depthWrite: false
+            });
+            const points = new THREE.Points(geo, mat);
+            points.rotation.x = tiltX;
+            points.rotation.z = tiltZ;
+            return points;
+        }
+
+        ring1 = createRing(7, 9, 3000, Math.PI / 3, 0.2);
+        scene.add(ring1);
+        // ring2 已删除 ✅
+
+        window.addEventListener('resize', onWindowResize, false);
+    }
+
+    function onWindowResize() {
+        camera.aspect = window.innerWidth / window.innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(window.innerWidth, window.innerHeight);
+    }
+
+    // --- MediaPipe 手势逻辑 ---
+    const hands = new Hands({
+        locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`
+    });
+
+    hands.setOptions({
+        maxNumHands: 1,
+        modelComplexity: 1,
+        minDetectionConfidence: 0.7,
+        minTrackingConfidence: 0.7
+    });
+
+    hands.onResults(onResults);
+
+    function onResults(results) {
+        if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+            statusElement.innerText = "手势控制已激活";
+            const landmarks = results.multiHandLandmarks[0];
+
+            const wrist     = landmarks[0];
+            const indexBase = landmarks[5];
+            const indexTip  = landmarks[8];
+            const middleTip = landmarks[12];
+            const ringTip   = landmarks[16];
+            const pinkyTip  = landmarks[20];
+
+            targetRotationY = (landmarks[0].x - 0.5) * 4;
+            targetRotationX = (landmarks[0].y - 0.5) * 4;
+
+            const tips = [indexTip, middleTip, ringTip, pinkyTip];
+            let distSum = 0;
+            tips.forEach(tip => {
+                const d = Math.sqrt(
+                    Math.pow(tip.x - wrist.x, 2) +
+                    Math.pow(tip.y - wrist.y, 2)
+                );
+                distSum += d;
+            });
+            const isFist = distSum < 0.6;
+
+            const palmWidth = Math.abs(indexBase.x - landmarks[17].x);
+
+            if (isFist) {
+                if (palmWidth < 0.15) targetDistance += 0.5;
+            } else {
+                if (palmWidth > 0.25) targetDistance -= 0.8;
+            }
+
+            targetDistance = Math.max(minDistance, Math.min(maxDistance, targetDistance));
+
+        // ── 绘制手部骨架 ──
+        const hCanvas = document.getElementById('hand-canvas');
+        const hCtx = hCanvas.getContext('2d');
+        hCanvas.width  = hCanvas.offsetWidth;
+        hCanvas.height = hCanvas.offsetHeight;
+        hCtx.clearRect(0, 0, hCanvas.width, hCanvas.height);
+
+        // MediaPipe 手部21个关节的连线定义
+        const CONNECTIONS = [
+            [0,1],[1,2],[2,3],[3,4],         // 拇指
+            [0,5],[5,6],[6,7],[7,8],         // 食指
+            [0,9],[9,10],[10,11],[11,12],    // 中指
+            [0,13],[13,14],[14,15],[15,16],  // 无名指
+            [0,17],[17,18],[18,19],[19,20],  // 小指
+            [5,9],[9,13],[13,17]             // 掌心横连
+        ];
+
+        // video 单独镜像，canvas 坐标直接用原始 lm.x
+        function lx(lm) { return (1 - lm.x) * hCanvas.width; }
+        function ly(lm) { return lm.y * hCanvas.height; }
+
+        // 画连线（渐变橙色）
+        CONNECTIONS.forEach(([a, b]) => {
+            const grad = hCtx.createLinearGradient(lx(landmarks[a]), ly(landmarks[a]), lx(landmarks[b]), ly(landmarks[b]));
+            grad.addColorStop(0, 'rgba(255, 160, 50, 0.85)');
+            grad.addColorStop(1, 'rgba(255, 220, 100, 0.85)');
+            hCtx.beginPath();
+            hCtx.moveTo(lx(landmarks[a]), ly(landmarks[a]));
+            hCtx.lineTo(lx(landmarks[b]), ly(landmarks[b]));
+            hCtx.strokeStyle = grad;
+            hCtx.lineWidth = 1.5;
+            hCtx.lineCap = 'round';
+            hCtx.stroke();
+        });
+
+        // 画关节点
+        landmarks.forEach((lm, i) => {
+            const isKnuckle = [0,5,9,13,17].includes(i); // 掌根 & 指根稍大
+            hCtx.beginPath();
+            hCtx.arc(lx(lm), ly(lm), isKnuckle ? 4 : 2.5, 0, Math.PI * 2);
+            hCtx.fillStyle = isKnuckle ? 'rgba(255,200,80,1)' : 'rgba(255,255,255,0.9)';
+            hCtx.shadowColor = 'rgba(255,160,50,0.8)';
+            hCtx.shadowBlur = 6;
+            hCtx.fill();
+            hCtx.shadowBlur = 0;
+        });
+        } else {
+            statusElement.innerText = "未检测到手部";
+            // 手消失时清空 canvas
+            const hc = document.getElementById('hand-canvas');
+            if (hc) hc.getContext('2d').clearRect(0, 0, hc.width, hc.height);
+        }
+    }
+
+    const cameraControl = new Camera(videoElement, {
+        onFrame: async () => {
+            await hands.send({ image: videoElement });
+        },
+        width: 640,
+        height: 480
+    });
+    cameraControl.start();
+
+    // --- 动画循环 ---
+    function animate() {
+        requestAnimationFrame(animate);
+
+        currentRotationX += (targetRotationX - currentRotationX) * 0.05;
+        currentRotationY += (targetRotationY - currentRotationY) * 0.05;
+
+        let distDiff = targetDistance - currentDistance;
+        let distStep;
+        if (distDiff > 0) {
+            distStep = distDiff * 0.02 + (distDiff * distDiff * 0.005);
+        } else {
+            distStep = distDiff * 0.1;
+        }
+        currentDistance += distStep;
+
+        camera.position.x =  currentDistance * Math.sin(currentRotationY) * Math.cos(currentRotationX);
+        camera.position.y = -currentDistance * Math.sin(currentRotationX);
+        camera.position.z =  currentDistance * Math.cos(currentRotationY) * Math.cos(currentRotationX);
+        camera.lookAt(0, 0, 0);
+
+        // 所有水果粒子组同步自转
+        planetGroups.forEach(p => { p.rotation.y += 0.002 * rotationSpeed; });
+        ring1.rotation.y -= 0.001 * rotationSpeed;
+
+        renderer.render(scene, camera);
+    }
+
+    window.onload = () => {
+        initThree();
+        animate();
+
+        // 滑块逻辑：将 0-100 映射到 0-3x 速度，中点(50)= ×1
+        const slider = document.getElementById('speed-slider');
+        const speedVal = document.getElementById('speed-val');
+        slider.addEventListener('input', () => {
+            rotationSpeed = (slider.value / 100) * 3;
+            speedVal.textContent = '×' + rotationSpeed.toFixed(1);
+        });
+        // 初始化显示
+        rotationSpeed = (slider.value / 100) * 3;
+        speedVal.textContent = '×' + rotationSpeed.toFixed(1);
+    };
+</script>
+</body>
+</html>
